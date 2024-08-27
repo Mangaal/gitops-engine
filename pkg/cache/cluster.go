@@ -140,7 +140,7 @@ type ClusterCache interface {
 	// OnEvent register event handler that is executed every time when new K8S event received
 	OnEvent(handler OnEventHandler) Unsubscribe
 
-	PopulateManagedAPIResources(manifests []unstructured.Unstructured, server string)
+	PopulateManagedAPIResources(manifests []*unstructured.Unstructured, server string)
 }
 
 type WeightedSemaphore interface {
@@ -1365,7 +1365,7 @@ func isDynamicResourceLookupEnabled() bool {
 	return true
 }
 
-func (c *clusterCache) PopulateManagedAPIResources(manifests []unstructured.Unstructured, server string) {
+func (c *clusterCache) PopulateManagedAPIResources(manifests []*unstructured.Unstructured, server string) {
 	if c.watchedResources == nil {
 		c.watchedResources = hashset.New[schema.GroupVersionKind]()
 	}
