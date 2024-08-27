@@ -1319,7 +1319,7 @@ func (c *clusterCache) GetClusterInfo() ClusterInfo {
 	defer c.lock.RUnlock()
 	c.syncStatus.lock.Lock()
 	defer c.syncStatus.lock.Unlock()
-
+	filterWatchedResources(c.apiResources, c.watchedResources)
 	return ClusterInfo{
 		APIsCount:         len(c.apisMeta),
 		K8SVersion:        c.serverVersion,
@@ -1327,7 +1327,7 @@ func (c *clusterCache) GetClusterInfo() ClusterInfo {
 		Server:            c.config.Host,
 		LastCacheSyncTime: c.syncStatus.syncTime,
 		SyncError:         c.syncStatus.syncError,
-		APIResources:      c.apiResources,
+		APIResources:      filterWatchedResources(c.apiResources, c.watchedResources),
 	}
 }
 
