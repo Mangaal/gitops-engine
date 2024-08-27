@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/ugurcsen/gods-generic/sets/hashset"
 	"golang.org/x/sync/semaphore"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -228,6 +230,8 @@ type clusterCache struct {
 	gvkParser                   *managedfields.GvkParser
 
 	respectRBAC int
+
+	watchedResources *hashset.Set[schema.GroupVersionKind]
 }
 
 type clusterCacheSync struct {
@@ -310,7 +314,7 @@ func (c *clusterCache) GetServerVersion() string {
 // updated in place (anytime new CRDs are introduced or removed). If necessary, a separate method
 // would need to be introduced to return a copy of the list so it can be iterated consistently.
 func (c *clusterCache) GetAPIResources() []kube.APIResourceInfo {
-	return c.apiResources
+	return filterWatchedResources(c.apiResources, c.watchedResources)
 }
 
 // GetOpenAPISchema returns open API schema of supported API resources
@@ -334,6 +338,11 @@ func (c *clusterCache) appendAPIResource(info kube.APIResourceInfo) {
 	}
 	if !exists {
 		c.apiResources = append(c.apiResources, info)
+		c.watchedResources.Add(schema.GroupVersionKind{
+			Group:   info.GroupKind.Group,
+			Version: info.Meta.Version,
+			Kind:    info.GroupKind.Kind,
+		})
 	}
 }
 
@@ -345,6 +354,12 @@ func (c *clusterCache) deleteAPIResource(info kube.APIResourceInfo) {
 			break
 		}
 	}
+
+	c.watchedResources.Remove(schema.GroupVersionKind{
+		Group:   info.GroupKind.Group,
+		Version: info.Meta.Version,
+		Kind:    info.GroupKind.Kind,
+	})
 }
 
 func (c *clusterCache) replaceResourceCache(gk schema.GroupKind, resources []*Resource, ns string) {
@@ -442,6 +457,7 @@ func (c *clusterCache) Invalidate(opts ...UpdateSettingsFunc) {
 	}
 	c.apisMeta = nil
 	c.namespacedResources = nil
+	c.watchedResources.Clear()
 	c.log.Info("Invalidated cluster")
 }
 
@@ -479,6 +495,7 @@ func (c *clusterCache) startMissingWatches() error {
 	if err != nil {
 		return err
 	}
+	apis = filterWatchedResources(apis, c.watchedResources)
 	client, err := c.kubectl.NewDynamicClient(c.config)
 	if err != nil {
 		return err
@@ -837,6 +854,7 @@ func (c *clusterCache) sync() error {
 	if err != nil {
 		return err
 	}
+	apiResources = filterWatchedResources(apiResources, c.watchedResources)
 	c.apiResources = apiResources
 
 	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(config)
@@ -851,10 +869,11 @@ func (c *clusterCache) sync() error {
 	c.openAPISchema = openAPISchema
 
 	apis, err := c.kubectl.GetAPIResources(c.config, true, c.settings.ResourcesFilter)
-
 	if err != nil {
 		return err
 	}
+
+	apis = filterWatchedResources(apis, c.watchedResources)
 	client, err := c.kubectl.NewDynamicClient(c.config)
 	if err != nil {
 		return err
@@ -983,6 +1002,7 @@ func (c *clusterCache) FindResources(namespace string, predicates ...func(r *Res
 			result[k] = r
 		}
 	}
+
 	return result
 }
 
@@ -1312,4 +1332,69 @@ func (c *clusterCache) GetClusterInfo() ClusterInfo {
 // We ignore API types which have a high churn rate, and/or whose updates are irrelevant to the app
 func skipAppRequeuing(key kube.ResourceKey) bool {
 	return ignoredRefreshResources[key.Group+"/"+key.Kind]
+}
+
+// filterWatchedResources filters out only those resources that the Application controller is intrested in if the Dynamic resource lookup feature is enabled, else does not do any filtering operation and returns all the API resources.
+func filterWatchedResources(apiResources []kube.APIResourceInfo, watchedResources *hashset.Set[schema.GroupVersionKind]) []kube.APIResourceInfo {
+	if isDynamicResourceLookupEnabled() {
+		var filteredResources []kube.APIResourceInfo
+		for _, resourceInfo := range apiResources {
+			resourceKey := schema.GroupVersionKind{
+				Group:   resourceInfo.GroupVersionResource.Group,
+				Version: resourceInfo.GroupVersionResource.Version,
+				Kind:    resourceInfo.GroupKind.Kind,
+			}
+			if watchedResources.Contains(resourceKey) {
+				textlogger.NewLogger(textlogger.NewConfig()).Info(fmt.Sprintf("Adding resource info as resource type %s is managed by the application controller", resourceKey.String()))
+				filteredResources = append(filteredResources, resourceInfo)
+			}
+		}
+		return filteredResources
+	}
+	return apiResources
+}
+
+// isDynamicResourceLookupEnabled return true if the dynamic resource lookup is enabled via an environment flag, false otherwise
+func isDynamicResourceLookupEnabled() bool {
+	if value, ok := os.LookupEnv("DYNAMIC_RESOURCE_LOOKUP_ENABLED"); ok && value == "true" {
+		textlogger.NewLogger(textlogger.NewConfig()).Info("Dynamic resource lookup feature is enabled")
+		return true
+	}
+	return true
+}
+
+func (c *clusterCache) PopulateManagedAPIResources(manifests []unstructured.Unstructured) {
+	if c.watchedResources == nil {
+		c.watchedResources = hashset.New[schema.GroupVersionKind]()
+	}
+
+	for _, manifest := range manifests {
+		groupVersionKind := manifest.GroupVersionKind()
+
+		// Add the primary resource
+		c.watchedResources.Add(groupVersionKind)
+
+		// Add related child resources based on the type of the primary resource
+		switch groupVersionKind.Kind {
+		case "Deployment":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "ReplicaSet"})
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
+		case "ReplicaSet":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
+		case "StatefulSet":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
+		case "DaemonSet":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
+		case "Job":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Pod"})
+		case "CronJob":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"})
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Pod"})
+		case "Service":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Endpoints"})
+		case "PersistentVolumeClaim":
+			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "PersistentVolume"})
+			// Add more cases as needed
+		}
+	}
 }
