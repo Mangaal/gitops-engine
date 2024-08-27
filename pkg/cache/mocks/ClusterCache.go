@@ -282,6 +282,11 @@ func (_m *ClusterCache) OnResourceUpdated(handler cache.OnResourceUpdatedHandler
 	return r0
 }
 
+// PopulateManagedAPIResources provides a mock function with given fields: manifests, server
+func (_m *ClusterCache) PopulateManagedAPIResources(manifests []*unstructured.Unstructured, server string) {
+	_m.Called(manifests, server)
+}
+
 // NewClusterCache creates a new instance of ClusterCache. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
 // The first argument is typically a *testing.T value.
 func NewClusterCache(t interface {
