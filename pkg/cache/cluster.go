@@ -179,7 +179,7 @@ func NewClusterCache(config *rest.Config, opts ...UpdateSettingsFunc) *clusterCa
 		listRetryLimit:          1,
 		listRetryUseBackoff:     false,
 		listRetryFunc:           ListRetryFuncNever,
-		watchedResources:        &hashset.Set[schema.GroupVersionKind]{},
+		watchedResources:        hashset.New[schema.GroupVersionKind](),
 	}
 	for i := range opts {
 		opts[i](cache)
