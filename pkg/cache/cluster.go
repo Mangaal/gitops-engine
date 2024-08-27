@@ -1400,4 +1400,6 @@ func (c *clusterCache) PopulateManagedAPIResources(manifests []*unstructured.Uns
 			// Add more cases as needed
 		}
 	}
+
+	fmt.Println("watchedResources", c.watchedResources.Values())
 }
