@@ -1338,6 +1338,8 @@ func skipAppRequeuing(key kube.ResourceKey) bool {
 
 // filterWatchedResources filters out only those resources that the Application controller is intrested in if the Dynamic resource lookup feature is enabled, else does not do any filtering operation and returns all the API resources.
 func filterWatchedResources(apiResources []kube.APIResourceInfo, watchedResources *hashset.Set[schema.GroupVersionKind]) []kube.APIResourceInfo {
+	fmt.Println("filterWatchedResourceswatchedResources", watchedResources.Values())
+
 	if isDynamicResourceLookupEnabled() {
 		var filteredResources []kube.APIResourceInfo
 		for _, resourceInfo := range apiResources {
