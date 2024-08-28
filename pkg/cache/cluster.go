@@ -1350,8 +1350,13 @@ func filterWatchedResources(apiResources []kube.APIResourceInfo, watchedResource
 				textlogger.NewLogger(textlogger.NewConfig()).Info(fmt.Sprintf("Adding resource info as resource type %s is managed by the application controller", resourceKey.String()))
 				filteredResources = append(filteredResources, resourceInfo)
 			}
+			fmt.Println("filterWatchedResources", filteredResources)
+			if watchedResources.Size() == 0 {
+				filteredResources = apiResources
+				break
+			}
 		}
-		fmt.Println("filterWatchedResources", apiResources)
+
 		return filteredResources
 	}
 
