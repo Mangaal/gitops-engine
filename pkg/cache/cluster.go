@@ -1346,15 +1346,15 @@ func filterWatchedResources(apiResources []kube.APIResourceInfo, watchedResource
 				Version: resourceInfo.GroupVersionResource.Version,
 				Kind:    resourceInfo.GroupKind.Kind,
 			}
-			if !watchedResources.Contains(resourceKey) {
+			if watchedResources.Contains(resourceKey) {
 				textlogger.NewLogger(textlogger.NewConfig()).Info(fmt.Sprintf("Adding resource info as resource type %s is managed by the application controller", resourceKey.String()))
 				filteredResources = append(filteredResources, resourceInfo)
 			}
 		}
+		fmt.Println("filterWatchedResources", apiResources)
 		return filteredResources
 	}
 
-	fmt.Println("filterWatchedResources", apiResources)
 	return apiResources
 }
 
