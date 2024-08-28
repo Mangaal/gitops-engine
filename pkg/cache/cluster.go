@@ -140,7 +140,7 @@ type ClusterCache interface {
 	// OnEvent register event handler that is executed every time when new K8S event received
 	OnEvent(handler OnEventHandler) Unsubscribe
 
-	PopulateManagedAPIResources(manifests []*unstructured.Unstructured, server string)
+	PopulateManagedAPIResources(groupVersionKinds []schema.GroupVersionKind, server string)
 }
 
 type WeightedSemaphore interface {
@@ -1366,39 +1366,14 @@ func isDynamicResourceLookupEnabled() bool {
 	return true
 }
 
-func (c *clusterCache) PopulateManagedAPIResources(manifests []*unstructured.Unstructured, server string) {
+func (c *clusterCache) PopulateManagedAPIResources(groupVersionKinds []schema.GroupVersionKind, server string) {
 	if c.watchedResources == nil {
 		c.watchedResources = hashset.New[schema.GroupVersionKind]()
 	}
 
-	for _, manifest := range manifests {
-		groupVersionKind := manifest.GroupVersionKind()
-
+	for _, groupVersionKind := range groupVersionKinds {
 		// Add the primary resource
 		c.watchedResources.Add(groupVersionKind)
-
-		// Add related child resources based on the type of the primary resource
-		switch groupVersionKind.Kind {
-		case "Deployment":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "ReplicaSet"})
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
-		case "ReplicaSet":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
-		case "StatefulSet":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
-		case "DaemonSet":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
-		case "Job":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Pod"})
-		case "CronJob":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"})
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Pod"})
-		case "Service":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Endpoints"})
-		case "PersistentVolumeClaim":
-			c.watchedResources.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "PersistentVolume"})
-			// Add more cases as needed
-		}
 	}
 
 	fmt.Println("watchedResources", c.watchedResources.Values())
