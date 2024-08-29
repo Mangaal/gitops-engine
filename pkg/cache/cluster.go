@@ -1345,6 +1345,7 @@ func (c *clusterCache) shouldWatchResource(resourceInfo kube.APIResourceInfo) bo
 	}
 	if isDynamicResourceLookupEnabled() {
 		// Check if the resource type should be watched based on the watchedResources set
+		fmt.Println("watchEvent check resource", c.watchedResources.Values())
 		return c.watchedResources.Contains(resourceKey)
 	}
 
