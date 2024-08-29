@@ -317,7 +317,7 @@ func (c *clusterCache) GetServerVersion() string {
 // updated in place (anytime new CRDs are introduced or removed). If necessary, a separate method
 // would need to be introduced to return a copy of the list so it can be iterated consistently.
 func (c *clusterCache) GetAPIResources() []kube.APIResourceInfo {
-	return filterWatchedResources(c.apiResources, c.watchedResources)
+	return c.apiResources
 }
 
 // GetOpenAPISchema returns open API schema of supported API resources
@@ -498,7 +498,6 @@ func (c *clusterCache) startMissingWatches() error {
 	if err != nil {
 		return err
 	}
-	apis = filterWatchedResources(apis, c.watchedResources)
 	client, err := c.kubectl.NewDynamicClient(c.config)
 	if err != nil {
 		return err
@@ -534,7 +533,10 @@ func (c *clusterCache) startMissingWatches() error {
 					}
 
 				}
-				go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
+				if c.shouldWatchResource(api) {
+					textlogger.NewLogger(textlogger.NewConfig()).Info(fmt.Sprintf("Adding resource info as resource %s is managed by the application controller", api.GroupKind.String()))
+					go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
+				}
 				return nil
 			})
 			if err != nil {
@@ -857,7 +859,6 @@ func (c *clusterCache) sync() error {
 	if err != nil {
 		return err
 	}
-	apiResources = filterWatchedResources(apiResources, c.watchedResources)
 	c.apiResources = apiResources
 
 	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(config)
@@ -876,7 +877,6 @@ func (c *clusterCache) sync() error {
 		return err
 	}
 
-	apis = filterWatchedResources(apis, c.watchedResources)
 	client, err := c.kubectl.NewDynamicClient(c.config)
 	if err != nil {
 		return err
@@ -932,9 +932,10 @@ func (c *clusterCache) sync() error {
 				}
 				return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
 			}
-
-			go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
-
+			if c.shouldWatchResource(api) {
+				textlogger.NewLogger(textlogger.NewConfig()).Info(fmt.Sprintf("Adding resource info as resource %s is managed by the application controller", api.GroupKind.String()))
+				go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
+			}
 			return nil
 		})
 	})
@@ -1326,7 +1327,7 @@ func (c *clusterCache) GetClusterInfo() ClusterInfo {
 		Server:            c.config.Host,
 		LastCacheSyncTime: c.syncStatus.syncTime,
 		SyncError:         c.syncStatus.syncError,
-		APIResources:      filterWatchedResources(c.apiResources, c.watchedResources),
+		APIResources:      c.apiResources,
 	}
 }
 
@@ -1336,35 +1337,18 @@ func skipAppRequeuing(key kube.ResourceKey) bool {
 	return ignoredRefreshResources[key.Group+"/"+key.Kind]
 }
 
-// filterWatchedResources filters out only those resources that the Application controller is intrested in if the Dynamic resource lookup feature is enabled, else does not do any filtering operation and returns all the API resources.
-func filterWatchedResources(apiResources []kube.APIResourceInfo, watchedResources *hashset.Set[schema.GroupVersionKind]) []kube.APIResourceInfo {
-	fmt.Println("filterWatchedResourceswatchedResources", watchedResources.Values())
-
+func (c *clusterCache) shouldWatchResource(resourceInfo kube.APIResourceInfo) bool {
+	resourceKey := schema.GroupVersionKind{
+		Group:   resourceInfo.GroupVersionResource.Group,
+		Version: resourceInfo.GroupVersionResource.Version,
+		Kind:    resourceInfo.GroupKind.Kind,
+	}
 	if isDynamicResourceLookupEnabled() {
-		var filteredResources []kube.APIResourceInfo
-		for _, resourceInfo := range apiResources {
-			resourceKey := schema.GroupVersionKind{
-				Group:   resourceInfo.GroupVersionResource.Group,
-				Version: resourceInfo.GroupVersionResource.Version,
-				Kind:    resourceInfo.GroupKind.Kind,
-			}
-			fmt.Println("filterWatchedResourcesresourceKey", resourceKey)
-			if watchedResources.Contains(resourceKey) {
-				fmt.Println("filterWatchedResources", filteredResources)
-				textlogger.NewLogger(textlogger.NewConfig()).Info(fmt.Sprintf("Adding resource info as resource type %s is managed by the application controller", resourceKey.String()))
-				filteredResources = append(filteredResources, resourceInfo)
-			}
-
-			if watchedResources.Size() == 0 {
-				filteredResources = apiResources
-				break
-			}
-		}
-
-		return filteredResources
+		// Check if the resource type should be watched based on the watchedResources set
+		return c.watchedResources.Contains(resourceKey)
 	}
 
-	return apiResources
+	return true
 }
 
 // isDynamicResourceLookupEnabled return true if the dynamic resource lookup is enabled via an environment flag, false otherwise
