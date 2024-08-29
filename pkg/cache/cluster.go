@@ -841,7 +841,7 @@ func (c *clusterCache) checkPermission(ctx context.Context, reviewInterface auth
 // changes.
 func (c *clusterCache) sync() error {
 	c.log.Info("Start syncing cluster")
-
+	fmt.Println("3")
 	for i := range c.apisMeta {
 		c.apisMeta[i].watchCancel()
 	}
@@ -932,6 +932,7 @@ func (c *clusterCache) sync() error {
 				}
 				return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
 			}
+			fmt.Println("2")
 			if c.shouldWatchResource(api) {
 				textlogger.NewLogger(textlogger.NewConfig()).Info(fmt.Sprintf("Adding resource info as resource %s is managed by the application controller", api.GroupKind.String()))
 				go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
@@ -972,6 +973,7 @@ func (c *clusterCache) EnsureSynced() error {
 	if syncStatus.synced(c.clusterSyncRetryTimeout) {
 		return syncStatus.syncError
 	}
+	fmt.Println("2")
 	err := c.sync()
 	syncTime := time.Now()
 	syncStatus.syncTime = &syncTime
