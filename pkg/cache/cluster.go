@@ -479,16 +479,13 @@ func (c *clusterCache) startMissingWatches() error {
 	if err != nil {
 		return err
 	}
-
 	client, err := c.kubectl.NewDynamicClient(c.config)
 	if err != nil {
 		return err
 	}
-	if c.respectRBAC != RespectRbacDisabled {
-		apis, err = c.filterApisByRBAC(context.Background(), apis)
-		if err != nil {
-			return err
-		}
+	clientset, err := kubernetes.NewForConfig(c.config)
+	if err != nil {
+		return err
 	}
 	namespacedResources := make(map[schema.GroupKind]bool)
 	for i := range apis {
@@ -500,8 +497,22 @@ func (c *clusterCache) startMissingWatches() error {
 
 			err := c.processApi(client, api, func(resClient dynamic.ResourceInterface, ns string) error {
 				resourceVersion, err := c.loadInitialState(ctx, api, resClient, ns, false) // don't lock here, we are already in a lock before startMissingWatches is called inside watchEvents
-				if err != nil {
-					return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
+				if err != nil && c.isRestrictedResource(err) {
+					keep := false
+					if c.respectRBAC == RespectRbacStrict {
+						k, permErr := c.checkPermission(ctx, clientset.AuthorizationV1().SelfSubjectAccessReviews(), api)
+						if permErr != nil {
+							return fmt.Errorf("failed to check permissions for resource %s: %w, original error=%v", api.GroupKind.String(), permErr, err.Error())
+						}
+						keep = k
+					}
+					// if we are not allowed to list the resource, remove it from the watch list
+					if !keep {
+						delete(c.apisMeta, api.GroupKind)
+						delete(namespacedResources, api.GroupKind)
+						return nil
+					}
+
 				}
 				go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 				return nil
@@ -605,7 +616,27 @@ func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo
 		if resourceVersion == "" {
 			resourceVersion, err = c.loadInitialState(ctx, api, resClient, ns, true)
 			if err != nil {
-				return err
+				if c.isRestrictedResource(err) {
+					clientset, err := kubernetes.NewForConfig(c.config)
+					if err != nil {
+						return err
+					}
+					keep := false
+					if c.respectRBAC == RespectRbacStrict {
+						k, permErr := c.checkPermission(ctx, clientset.AuthorizationV1().SelfSubjectAccessReviews(), api)
+						if permErr != nil {
+							return fmt.Errorf("failed to check permissions for resource %s: %w, original error=%v", api.GroupKind.String(), permErr, err.Error())
+						}
+						keep = k
+					}
+					// if we are not allowed to list the resource, return nil
+					if !keep {
+						fmt.Printf("/n respectRBAC is enable and resource %s is restricted to watch", api.GroupKind.String())
+						return nil
+					}
+				} else {
+					return err
+				}
 			}
 		}
 
@@ -815,20 +846,20 @@ func (c *clusterCache) sync() error {
 	c.apisMeta = make(map[schema.GroupKind]*apiMeta)
 	c.resources = make(map[kube.ResourceKey]*Resource)
 	c.namespacedResources = make(map[schema.GroupKind]bool)
-
-	version, err := c.kubectl.GetServerVersion(c.config)
+	config := c.config
+	version, err := c.kubectl.GetServerVersion(config)
 
 	if err != nil {
 		return err
 	}
 	c.serverVersion = version
-	apiResources, err := c.kubectl.GetAPIResources(c.config, false, NewNoopSettings())
+	apiResources, err := c.kubectl.GetAPIResources(config, false, NewNoopSettings())
 	if err != nil {
 		return err
 	}
 	c.apiResources = apiResources
 
-	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(c.config)
+	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(config)
 	if err != nil {
 		return fmt.Errorf("failed to load open api schema while syncing cluster cache: %w", err)
 	}
@@ -848,13 +879,11 @@ func (c *clusterCache) sync() error {
 	if err != nil {
 		return err
 	}
-
-	if c.respectRBAC != RespectRbacDisabled {
-		apis, err = c.filterApisByRBAC(context.Background(), apis)
-		if err != nil {
-			return err
-		}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return err
 	}
+
 	// Each API is processed in parallel, so we need to take out a lock when we update clusterCache fields.
 	lock := sync.Mutex{}
 	err = kube.RunAllAsync(len(apis), func(i int) error {
@@ -881,6 +910,24 @@ func (c *clusterCache) sync() error {
 				})
 			})
 			if err != nil {
+				if c.isRestrictedResource(err) {
+					keep := false
+					if c.respectRBAC == RespectRbacStrict {
+						k, permErr := c.checkPermission(ctx, clientset.AuthorizationV1().SelfSubjectAccessReviews(), api)
+						if permErr != nil {
+							return fmt.Errorf("failed to check permissions for resource %s: %w, original error=%v", api.GroupKind.String(), permErr, err.Error())
+						}
+						keep = k
+					}
+					// if we are not allowed to list the resource, remove it from the watch list
+					if !keep {
+						lock.Lock()
+						delete(c.apisMeta, api.GroupKind)
+						delete(c.namespacedResources, api.GroupKind)
+						lock.Unlock()
+						return nil
+					}
+				}
 				return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
 			}
 
@@ -897,35 +944,6 @@ func (c *clusterCache) sync() error {
 
 	c.log.Info("Cluster successfully synced")
 	return nil
-}
-
-// filterApisByRBAC filters the APIs based on RBAC permissions
-func (c *clusterCache) filterApisByRBAC(ctx context.Context, allApis []kube.APIResourceInfo) ([]kube.APIResourceInfo, error) {
-	var allowedApis []kube.APIResourceInfo
-	clientset, err := kubernetes.NewForConfig(c.config)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, api := range allApis {
-		// Skip RBAC check if not strict
-		if c.respectRBAC == RespectRbacStrict {
-			k, err := c.checkPermission(ctx, clientset.AuthorizationV1().SelfSubjectAccessReviews(), api)
-			if err != nil {
-				return nil, fmt.Errorf("failed to check permissions for resource %s: %w", api.GroupKind.String(), err)
-			}
-
-			// Only add APIs that have permission
-			if k {
-				allowedApis = append(allowedApis, api)
-			}
-		} else {
-			// If not strict, include all APIs
-			allowedApis = append(allowedApis, api)
-		}
-	}
-
-	return allowedApis, nil
 }
 
 // EnsureSynced checks cache state and synchronizes it if necessary
