@@ -479,13 +479,16 @@ func (c *clusterCache) startMissingWatches() error {
 	if err != nil {
 		return err
 	}
+
 	client, err := c.kubectl.NewDynamicClient(c.config)
 	if err != nil {
 		return err
 	}
-	clientset, err := kubernetes.NewForConfig(c.config)
-	if err != nil {
-		return err
+	if c.respectRBAC != RespectRbacDisabled {
+		apis, err = c.filterApisByRBAC(context.Background(), apis)
+		if err != nil {
+			return err
+		}
 	}
 	namespacedResources := make(map[schema.GroupKind]bool)
 	for i := range apis {
@@ -497,22 +500,8 @@ func (c *clusterCache) startMissingWatches() error {
 
 			err := c.processApi(client, api, func(resClient dynamic.ResourceInterface, ns string) error {
 				resourceVersion, err := c.loadInitialState(ctx, api, resClient, ns, false) // don't lock here, we are already in a lock before startMissingWatches is called inside watchEvents
-				if err != nil && c.isRestrictedResource(err) {
-					keep := false
-					if c.respectRBAC == RespectRbacStrict {
-						k, permErr := c.checkPermission(ctx, clientset.AuthorizationV1().SelfSubjectAccessReviews(), api)
-						if permErr != nil {
-							return fmt.Errorf("failed to check permissions for resource %s: %w, original error=%v", api.GroupKind.String(), permErr, err.Error())
-						}
-						keep = k
-					}
-					// if we are not allowed to list the resource, remove it from the watch list
-					if !keep {
-						delete(c.apisMeta, api.GroupKind)
-						delete(namespacedResources, api.GroupKind)
-						return nil
-					}
-
+				if err != nil {
+					return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
 				}
 				go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 				return nil
@@ -826,20 +815,20 @@ func (c *clusterCache) sync() error {
 	c.apisMeta = make(map[schema.GroupKind]*apiMeta)
 	c.resources = make(map[kube.ResourceKey]*Resource)
 	c.namespacedResources = make(map[schema.GroupKind]bool)
-	config := c.config
-	version, err := c.kubectl.GetServerVersion(config)
+
+	version, err := c.kubectl.GetServerVersion(c.config)
 
 	if err != nil {
 		return err
 	}
 	c.serverVersion = version
-	apiResources, err := c.kubectl.GetAPIResources(config, false, NewNoopSettings())
+	apiResources, err := c.kubectl.GetAPIResources(c.config, false, NewNoopSettings())
 	if err != nil {
 		return err
 	}
 	c.apiResources = apiResources
 
-	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(config)
+	openAPISchema, gvkParser, err := c.kubectl.LoadOpenAPISchema(c.config)
 	if err != nil {
 		return fmt.Errorf("failed to load open api schema while syncing cluster cache: %w", err)
 	}
@@ -861,11 +850,7 @@ func (c *clusterCache) sync() error {
 	}
 
 	if c.respectRBAC != RespectRbacDisabled {
-		clientset, err := kubernetes.NewForConfig(config)
-		if err != nil {
-			return err
-		}
-		apis, err = c.filterApisByRBAC(context.Background(), clientset, apis)
+		apis, err = c.filterApisByRBAC(context.Background(), apis)
 		if err != nil {
 			return err
 		}
@@ -915,8 +900,12 @@ func (c *clusterCache) sync() error {
 }
 
 // filterApisByRBAC filters the APIs based on RBAC permissions
-func (c *clusterCache) filterApisByRBAC(ctx context.Context, clientset kubernetes.Interface, allApis []kube.APIResourceInfo) ([]kube.APIResourceInfo, error) {
+func (c *clusterCache) filterApisByRBAC(ctx context.Context, allApis []kube.APIResourceInfo) ([]kube.APIResourceInfo, error) {
 	var allowedApis []kube.APIResourceInfo
+	clientset, err := kubernetes.NewForConfig(c.config)
+	if err != nil {
+		return nil, err
+	}
 
 	for _, api := range allApis {
 		// Skip RBAC check if not strict
