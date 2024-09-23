@@ -859,11 +859,17 @@ func (c *clusterCache) sync() error {
 	if err != nil {
 		return err
 	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return err
-	}
 
+	if c.respectRBAC != RespectRbacDisabled {
+		clientset, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			return err
+		}
+		apis, err = c.filterApisByRBAC(context.Background(), clientset, apis)
+		if err != nil {
+			return err
+		}
+	}
 	// Each API is processed in parallel, so we need to take out a lock when we update clusterCache fields.
 	lock := sync.Mutex{}
 	err = kube.RunAllAsync(len(apis), func(i int) error {
@@ -890,24 +896,6 @@ func (c *clusterCache) sync() error {
 				})
 			})
 			if err != nil {
-				if c.isRestrictedResource(err) {
-					keep := false
-					if c.respectRBAC == RespectRbacStrict {
-						k, permErr := c.checkPermission(ctx, clientset.AuthorizationV1().SelfSubjectAccessReviews(), api)
-						if permErr != nil {
-							return fmt.Errorf("failed to check permissions for resource %s: %w, original error=%v", api.GroupKind.String(), permErr, err.Error())
-						}
-						keep = k
-					}
-					// if we are not allowed to list the resource, remove it from the watch list
-					if !keep {
-						lock.Lock()
-						delete(c.apisMeta, api.GroupKind)
-						delete(c.namespacedResources, api.GroupKind)
-						lock.Unlock()
-						return nil
-					}
-				}
 				return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
 			}
 
@@ -924,6 +912,31 @@ func (c *clusterCache) sync() error {
 
 	c.log.Info("Cluster successfully synced")
 	return nil
+}
+
+// filterApisByRBAC filters the APIs based on RBAC permissions
+func (c *clusterCache) filterApisByRBAC(ctx context.Context, clientset kubernetes.Interface, allApis []kube.APIResourceInfo) ([]kube.APIResourceInfo, error) {
+	var allowedApis []kube.APIResourceInfo
+
+	for _, api := range allApis {
+		// Skip RBAC check if not strict
+		if c.respectRBAC == RespectRbacStrict {
+			k, err := c.checkPermission(ctx, clientset.AuthorizationV1().SelfSubjectAccessReviews(), api)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check permissions for resource %s: %w", api.GroupKind.String(), err)
+			}
+
+			// Only add APIs that have permission
+			if k {
+				allowedApis = append(allowedApis, api)
+			}
+		} else {
+			// If not strict, include all APIs
+			allowedApis = append(allowedApis, api)
+		}
+	}
+
+	return allowedApis, nil
 }
 
 // EnsureSynced checks cache state and synchronizes it if necessary
