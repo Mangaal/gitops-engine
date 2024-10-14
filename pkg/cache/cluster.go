@@ -911,6 +911,8 @@ func (c *clusterCache) sync() error {
 				return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
 			}
 
+			c.log.Info("Start watch", "resource", api.GroupKind.String(), "resourceVersion", resourceVersion, "server", c.config.Host)
+
 			go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 
 			return nil
