@@ -564,9 +564,8 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 				}
 				return ierr
 			}
-			if strings.Contains(res.GetKind(), "Project") {
-				fmt.Println("testing", res)
-			}
+
+			fmt.Println("testing", res)
 			resourceVersion = res.GetResourceVersion()
 			return nil
 		})
